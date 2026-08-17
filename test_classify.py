@@ -1,7 +1,7 @@
 import numpy as np
 
 import classify
-from classify import Candidate, _dedupe_by_code
+from classify import Candidate, _dedupe_by_code, confidence_gap
 from references import Reference
 
 
@@ -70,3 +70,17 @@ def test_classify_respects_top_k(monkeypatch):
 
     result = classify.classify("query", index, top_k=3, use_rerank=False)
     assert len(result) == 3
+
+
+def test_confidence_gap_is_difference_between_top_two_scores():
+    candidates = [
+        Candidate(code="1", title="a", level="Heading", score=5.0),
+        Candidate(code="2", title="b", level="Heading", score=2.0),
+        Candidate(code="3", title="c", level="Heading", score=1.0),
+    ]
+    assert confidence_gap(candidates) == 3.0
+
+
+def test_confidence_gap_none_with_fewer_than_two_candidates():
+    assert confidence_gap([]) is None
+    assert confidence_gap([Candidate(code="1", title="a", level="Heading", score=5.0)]) is None

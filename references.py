@@ -21,6 +21,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DATA_PATH = Path(__file__).parent / "data" / "search_references.json"
+# Official chapter/heading nomenclature text (see fetch_nomenclature.py) -
+# same {title, code, level} shape as search_references.json, so
+# load_references() reads either file. Only ever added to the retrieval
+# index, never eligible as an eval query - these are legal-nomenclature
+# descriptions, not the kind of short product-name text a real query
+# looks like, so testing against them wouldn't measure the right thing.
+DEFAULT_NOMENCLATURE_PATH = Path(__file__).parent / "data" / "nomenclature.json"
 
 # Deterministic - same eval set every run, so accuracy numbers are
 # reproducible and comparable across changes to the retrieval/rerank

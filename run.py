@@ -2,8 +2,9 @@
 run.py
 
 One-command commodity/HS code lookup: builds a retrieval index over the
-UK Trade Tariff reference data, then answers questions about a product
-description in an interactive loop.
+UK Trade Tariff reference data (official titles + nomenclature text),
+then answers questions about a product description in an interactive
+loop.
 
 Usage:
     python run.py
@@ -11,8 +12,9 @@ Usage:
 
 import argparse
 
-from classify import build_index, classify
-from references import load_references
+from classify import CONFIDENCE_GAP_THRESHOLD, build_index, classify, confidence_gap
+from duty import fetch_standard_duty_rate
+from references import DEFAULT_NOMENCLATURE_PATH, load_references
 
 
 def _format_code(code: str) -> str:
@@ -27,12 +29,16 @@ def main() -> None:
     parser.add_argument(
         "--no-rerank", action="store_true", help="Skip cross-encoder re-ranking (faster, less accurate)"
     )
+    parser.add_argument(
+        "--no-duty", action="store_true", help="Skip the live duty-rate lookup for the top candidate"
+    )
     args = parser.parse_args()
 
     print("Loading reference data and building index...")
-    references = load_references()
-    index = build_index(references)
-    print(f"Indexed {len(references)} reference titles ({len({r.code for r in references})} distinct codes).")
+    search_refs = load_references()
+    nomenclature_refs = load_references(DEFAULT_NOMENCLATURE_PATH)
+    index = build_index(search_refs + nomenclature_refs)
+    print(f"Indexed {len(search_refs)} reference titles + {len(nomenclature_refs)} nomenclature entries.")
     print("Describe a product, or type 'quit' to exit.\n")
 
     while True:
@@ -47,10 +53,21 @@ def main() -> None:
             print("No matches found.\n")
             continue
 
+        gap = confidence_gap(candidates)
+        if gap is not None and gap < CONFIDENCE_GAP_THRESHOLD:
+            print(
+                "  [low confidence - top candidates scored close together; "
+                "this description may be genuinely ambiguous]"
+            )
+
         print()
         for i, c in enumerate(candidates, start=1):
             print(f"  [{i}] {_format_code(c.code)}  (score: {c.score:.2f})")
             print(f"      matched: {c.title!r} ({c.level})")
+            if i == 1 and not args.no_duty:
+                duty_rate = fetch_standard_duty_rate(c.code)
+                if duty_rate:
+                    print(f"      standard (non-preferential) duty rate: {duty_rate}")
         print()
 
 

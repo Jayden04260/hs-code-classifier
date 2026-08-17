@@ -20,6 +20,14 @@ all ~1,600 would take a long time for a script meant to be run and
 re-run during development. The subsample is a deterministic shuffle
 (same DEFAULT_SEED as the train/eval split itself), not cherry-picked.
 
+Also reports a confidence-bucket breakdown: candidates are grouped by
+the score gap between the top and second result (classify.confidence_gap)
+into quartiles, with top-1 accuracy reported per bucket. This is what
+justifies (or would have disproven) adding a confidence gate - see
+classify.CONFIDENCE_GAP_THRESHOLD, picked from this same measurement
+rather than guessed, the same way local-rag's NO_ANSWER_THRESHOLD was
+picked from eval_retrieval_gate.py's threshold sweep.
+
 Not a pass/fail test - a measurement script. Run it directly:
 
     python eval_classification.py
@@ -29,7 +37,13 @@ import random
 
 from classify import SEARCH_POOL, _dedupe_by_code, build_index
 from embeddings import embed_texts
-from references import DEFAULT_SEED, Reference, load_references, split_train_eval
+from references import (
+    DEFAULT_NOMENCLATURE_PATH,
+    DEFAULT_SEED,
+    Reference,
+    load_references,
+    split_train_eval,
+)
 from rerank import rerank as rerank_candidates
 
 MAX_EVAL_QUERIES = 500
@@ -61,12 +75,15 @@ def _report(label: str, ranks: list[int | None], eval_refs: list[Reference], top
     print(f"    top1 chapter match (first 2 digits):  {chapter_hits / n:.2f}")
 
 
-def _run(index, eval_refs: list[Reference], use_rerank: bool) -> tuple[list[int | None], list[Reference | None]]:
+def _run(
+    index, eval_refs: list[Reference], use_rerank: bool
+) -> tuple[list[int | None], list[Reference | None], list[float | None]]:
     queries = [ref.title for ref in eval_refs]
     query_vectors = embed_texts(queries)
 
     ranks: list[int | None] = []
     top1_refs: list[Reference | None] = []
+    gaps: list[float | None] = []
     for expected, query, query_vector in zip(eval_refs, queries, query_vectors):
         candidates = index.search(query_vector, top_k=SEARCH_POOL)
         if use_rerank:
@@ -75,25 +92,62 @@ def _run(index, eval_refs: list[Reference], use_rerank: bool) -> tuple[list[int 
 
         ranks.append(_rank_of_correct_code(deduped, expected.code))
         top1_refs.append(deduped[0][0] if deduped else None)
+        gaps.append(deduped[0][1] - deduped[1][1] if len(deduped) >= 2 else None)
 
-    return ranks, top1_refs
+    return ranks, top1_refs, gaps
+
+
+def _report_confidence_buckets(ranks: list[int | None], gaps: list[float | None]) -> None:
+    pairs = [(gap, rank) for gap, rank in zip(gaps, ranks) if gap is not None]
+    pairs.sort(key=lambda p: p[0])
+
+    n = len(pairs)
+    quartile_size = n // 4
+    print("  confidence-gap quartiles (top1 accuracy per bucket, lowest gap first):")
+    for q in range(4):
+        start = q * quartile_size
+        end = (q + 1) * quartile_size if q < 3 else n
+        bucket = pairs[start:end]
+        if not bucket:
+            continue
+        gap_lo, gap_hi = bucket[0][0], bucket[-1][0]
+        acc = sum(1 for _gap, rank in bucket if rank == 1) / len(bucket)
+        print(f"    Q{q + 1} (gap {gap_lo:.2f} to {gap_hi:.2f}, n={len(bucket)}): top1 accuracy = {acc:.2f}")
 
 
 def main() -> None:
     references = load_references()
     index_refs, eval_refs = split_train_eval(references)
+    nomenclature_refs = load_references(DEFAULT_NOMENCLATURE_PATH)
 
     if len(eval_refs) > MAX_EVAL_QUERIES:
         random.Random(DEFAULT_SEED).shuffle(eval_refs)
         eval_refs = eval_refs[:MAX_EVAL_QUERIES]
 
-    print(f"Index: {len(index_refs)} references. Eval: {len(eval_refs)} held-out queries.\n")
+    print(f"Eval: {len(eval_refs)} held-out queries.\n")
 
+    print(f"=== Index: {len(index_refs)} reference titles only ===\n")
     index = build_index(index_refs)
-
     for label, use_rerank in [("cosine only", False), ("+ re-ranking", True)]:
-        ranks, top1_refs = _run(index, eval_refs, use_rerank)
+        ranks, top1_refs, gaps = _run(index, eval_refs, use_rerank)
         _report(label, ranks, eval_refs, top1_refs)
+        if use_rerank:
+            # Reranked mode is what run.py defaults to, so that's the
+            # mode the confidence gate needs to be calibrated against.
+            _report_confidence_buckets(ranks, gaps)
+        print()
+
+    combined_refs = index_refs + nomenclature_refs
+    print(
+        f"=== Index: {len(index_refs)} reference titles + "
+        f"{len(nomenclature_refs)} official nomenclature entries ===\n"
+    )
+    combined_index = build_index(combined_refs)
+    for label, use_rerank in [("cosine only", False), ("+ re-ranking", True)]:
+        ranks, top1_refs, gaps = _run(combined_index, eval_refs, use_rerank)
+        _report(label, ranks, eval_refs, top1_refs)
+        if use_rerank:
+            _report_confidence_buckets(ranks, gaps)
         print()
 
 
