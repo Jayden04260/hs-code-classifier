@@ -115,6 +115,13 @@ pip install -r requirements-app.txt
 streamlit run app.py
 ```
 
+Or double-click `run.bat` (creates a `.venv` and installs both
+`requirements.txt` and `requirements-app.txt` on first run if one
+doesn't exist yet) to launch the web version without touching a
+terminal. `hs-code-classifier.ico` is a matching icon if you want to
+set one on a desktop shortcut to it (right-click the shortcut ->
+Properties -> Change Icon).
+
 ## Confidence gate
 
 When the score gap between the top and second candidate is small, the
