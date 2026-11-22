@@ -56,14 +56,14 @@ python fetch_nomenclature.py
 data/search_references.json + data/nomenclature.json
         |
         v
-  embeddings.py                 (sentence-transformers, local model)
-        |
+  embeddings.py                 (bge-large fine-tuned on the tariff data,
+        |                        local; index vectors cached on disk)
         v
   index.py                      (hand-rolled cosine-similarity search)
         |
         v
-  rerank.py                     (cross-encoder re-scores candidates)
-        |
+  rerank.py                     (optional cross-encoder, off by default -
+        |                        see "How accurate is it?")
         v
   classify.py                   (dedupe by code -> top-k candidates,
         |                        + confidence-gap check)
@@ -72,8 +72,13 @@ data/search_references.json + data/nomenclature.json
                                   the top candidate)
 ```
 
-No LLM/GGUF model involved - classification is pure retrieval, so
-there's no multi-gigabyte model download needed to run this.
+No LLM/GGUF model involved - classification is pure retrieval. The
+embedder ([`Jayden04260/hs-code-embedder-bge-large`](https://huggingface.co/Jayden04260/hs-code-embedder-bge-large),
+made by `train_embedder.py`) is a ~1.3GB one-off download. The first
+run embeds the ~10k reference entries (seconds on a GPU, a minute or
+two on a CPU) and caches the vectors, so later runs start quickly. On a
+slow machine, `HS_EMBED_MODEL=all-MiniLM-L6-v2` switches back to the
+previous ~90MB model, which is faster and less accurate.
 
 ## Usage
 
@@ -87,25 +92,24 @@ python run.py
 ```
 > wireless bluetooth headphones
 
-  [low confidence - top candidates scored close together; this description may be genuinely ambiguous]
-
-  [1] 8517 00 00 00  (score: 3.12)
-      matched: 'bluetooth wireless speaker adapters' (Heading)
-  [2] 8518 30 00 90  (score: 2.59)
+  [1] 8518 30 00 90  (score: 0.900)
       matched: 'headphones, wireless' (Commodity)
-  [3] 8517 62 00 00  (score: 2.59)
+  [2] 8517 62 00 00  (score: 0.859)
       matched: 'bluetooth headset' (Commodity)
+  [3] 8517 00 00 00  (score: 0.819)
+      matched: 'bluetooth wireless speaker adapters' (Heading)
 ```
 
-(Real output, not cleaned up for the README - this query happens to be
-a case the confidence gate correctly flags: the top match is a heading
-one level too broad, and the actual best answer is rank 2. That's the
-gate doing its job, not a cherry-picked failure.)
+(Real output, not cleaned up for the README. With the previous model
+this exact query put a too-broad heading first, the right code second,
+and raised the low-confidence flag; the fine-tuned model ranks the right
+code first, clearly enough that the flag stays off.)
 
 Every candidate shows the reference title it actually matched against
 and its score, so you can judge for yourself whether it's a good match
-- not a black-box answer. Pass `--no-rerank` to skip cross-encoder
-re-ranking, `--no-duty` to skip the live duty-rate lookup.
+- not a black-box answer. Pass `--rerank` to add cross-encoder
+re-ranking (off by default, see below), `--no-duty` to skip the live
+duty-rate lookup.
 
 Or run the web version (no LLM download needed here either, so this is
 genuinely lightweight to try):
@@ -128,12 +132,15 @@ When the score gap between the top and second candidate is small, the
 tool flags the result as low-confidence instead of presenting it with
 the same visual weight as a clear match - the description may
 genuinely be ambiguous between two plausible codes. `CONFIDENCE_GAP_THRESHOLD`
-in `classify.py` (1.6) wasn't guessed - it's picked from
-`eval_classification.py`'s confidence-gap quartile breakdown: queries
-in the bottom two quartiles (small gap) averaged **31%** top-1 accuracy;
-the top two quartiles (large gap) averaged **53%** - a real, measured
-split. Same reasoning as this author's local-rag project's
-`NO_ANSWER_THRESHOLD`, applied to a different problem.
+in `classify.py` (0.04, in cosine-similarity units) wasn't guessed - it's
+picked from `eval_classification.py`'s confidence-gap quartile breakdown:
+held-out queries in the bottom two quartiles (small gap) averaged **33%**
+top-1 accuracy; the top two quartiles (large gap) averaged **68%**.
+Checked on real listings too (`eval_hscodecomp.py`): flagged results get
+the heading right 33% of the time, unflagged ones 66%. The flag fires on
+70% of those noisy marketplace listings, which is what it should do on
+inputs the tool is genuinely unsure about. Same reasoning as this author's
+local-rag project's `NO_ANSWER_THRESHOLD`, applied to a different problem.
 
 ## Duty rate lookup
 
@@ -152,8 +159,75 @@ preferential rates or quotas, which depend on more than the code alone
 
 ```bash
 python eval_classification.py    # held-out split of the real reference data
+python eval_hscodecomp.py        # 632 real e-commerce listings, expert-classified
 python eval_realistic.py         # small hand-written realistic-description set
 ```
+
+### Current model (fine-tuned bge-large, no re-ranking)
+
+| Test | Previous (MiniLM + re-ranking) | **Current** |
+|---|---|---|
+| Held-out titles: exact code, top-1 | 0.42 | **0.50** |
+| Held-out titles: exact code, top-5 | 0.68 | **0.76** |
+| Held-out titles: heading / chapter | 0.56 / 0.75 | **0.64 / 0.85** |
+| **Real listings (HSCodeComp): heading** | 0.30 | **0.43** |
+| Real listings: chapter | 0.51 | **0.67** |
+| Real listings: 6-digit subheading | 0.09 | **0.14** |
+| Hand-written descriptions: top-1 / top-5 | 0.70 / 0.90 | **0.85** / 0.85 |
+
+**The real-listing test** ([HSCodeComp](https://huggingface.co/datasets/ATH-MaaS/HSCodeComp),
+Apache-2.0, [paper](https://arxiv.org/abs/2510.19631)) is the honest
+number. It has 632 real marketplace listings with noisy titles ("European
+and American New Retro High-quality Gorgeous... Dragon Magnetic Pendant"),
+each classified by customs experts. Its codes are US codes, so only the
+internationally shared first 6 digits are comparable; heading (4 digits)
+is the headline. The query is the listing title + platform category +
+stated material. For scale: the paper's best deep-search AI agent (SmolAgent + GPT-5, with web
+search) gets 46.8% of *full 10-digit* codes right. That's a harder task
+than this tool's top-1 heading, but it shows how hard noisy listings are.
+Both halves of the set improved similarly (0.34 → 0.41 and 0.35 → 0.44),
+so the gain isn't one lucky subset.
+
+**How it got there** (`train_embedder.py`; each step measured on all
+three tests before being kept):
+
+| Change | Held-out top-1 | Real listings: heading |
+|---|---|---|
+| Previous: all-MiniLM-L6-v2 + ms-marco re-ranker | 0.42 | 0.30 |
+| Same embedder, re-ranking off | 0.38 | 0.35 |
+| Newer embedders, untuned: bge-base / bge-large / e5-large / gte-base / Qwen3-0.6B | 0.39-0.44 | 0.33-0.40 |
+| mxbai-embed-large (best untuned) | 0.44 | 0.42 |
+| bge-base fine-tuned, 1 epoch | 0.47 | 0.42 |
+| bge-base fine-tuned, 2 epochs | 0.47 | 0.34 |
+| **bge-large fine-tuned, 1 epoch** | **0.50** | **0.43** |
+
+Findings worth stating plainly:
+
+- **Re-ranking was hurting real-world queries.** Every cross-encoder tried
+  (ms-marco-MiniLM, bge-reranker-base, bge-reranker-v2-m3,
+  mxbai-rerank-base) *lowered* heading accuracy on real listings, by 5-18
+  points. On the fine-tuned model, re-ranking costs 0.43 → 0.35. These
+  rerankers are trained on web search (question → passage), and they don't
+  transfer to "messy listing → terse tariff title". So re-ranking is now
+  opt-in (`--rerank`).
+- **Fine-tuning on the tariff data's own synonyms and hierarchy** is what
+  moved the held-out numbers. Training pairs come only from the index side
+  of the split (enforced in `test_train_embedder.py`), and HSCodeComp is
+  never trained on.
+- **More training made real-world accuracy worse.** Two epochs fit the
+  short, formal title style so closely that real-listing heading accuracy
+  fell 8 points, even though held-out titles held steady. Without the
+  realistic test set this regression would have been invisible.
+- **Things that helped held-out titles but hurt real listings, so were
+  dropped:** blending in BM25 keyword scores, and embedding each title
+  together with its official heading text.
+- **Regression on the hand-written set:** "men's cotton crew-neck
+  t-shirts, machine knitted" now matches *woven* men's t-shirts, so the
+  right code (6109, knitted) drops out of the top 5. Two other misses land
+  on the right heading with a less specific code ("Other fruit, fresh" for
+  star fruit).
+
+### History: the original MiniLM pipeline
 
 **Held-out reference-title split** (500 titles never seen by the
 retrieval index - see `references.py` for exactly how the split avoids
@@ -166,8 +240,8 @@ leaking the answer):
 | + nomenclature | cosine | 0.38 | 0.58 | 0.66 | 0.48 | 0.49 | 0.71 |
 | **+ nomenclature** | **+ re-ranking** | **0.42** | **0.60** | **0.68** | **0.52** | **0.56** | **0.75** |
 
-The bottom row is what this ships with. Two things worth calling out
-honestly:
+The bottom row is what this shipped with before the fine-tuned model. Two
+things worth calling out honestly:
 
 - **Adding the official nomenclature text measurably helped** - exact
   top-1 accuracy went from 0.34 to 0.42, chapter accuracy from 0.69 to
@@ -178,7 +252,8 @@ honestly:
   little for a cross-encoder to resolve. Against the combined corpus,
   where candidates now range from three-word titles to full legal
   descriptions, it measurably helps (0.38 -> 0.42 top-1). Reported both
-  ways rather than only the flattering one.
+  ways rather than only the flattering one. (Later, the real-listing test
+  showed it hurting real queries - see above.)
 
 **Hand-written realistic descriptions** (20 examples, e.g. "Men's 100%
 cotton crew-neck t-shirts, machine knitted, various colors, retail
@@ -209,17 +284,22 @@ ruff check .
 
 Tests mock the network fetch and heavy models where the underlying
 logic doesn't need them (deduplication, train/eval splitting, index
-search, duty-rate extraction); `test_rerank.py` runs the real small
+search, duty-rate extraction, the embedding cache);
+`test_train_embedder.py` checks that no held-out title leaks into the
+training pairs; `test_rerank.py` runs the real small
 cross-encoder model directly, same testing philosophy as this author's
 other local-first projects.
 
 ## Limitations
 
-- The realistic-description eval is small (20 hand-written examples) -
-  useful as a sanity check on real-world phrasing, not a statistically
-  powered claim the way the 500-query held-out split is. No larger
-  public dataset pairing realistic descriptions with verified HS codes
-  was found while building this.
+- HSCodeComp covers 27 chapters, mostly consumer goods sold online
+  (jewellery, clothing, toys, electronics). Bulk industrial goods,
+  chemicals and food are under-represented, so its numbers say little
+  about those. Its expert codes are US codes, so it can't test the UK-only
+  last 4 digits at all.
+- The fine-tuned model was chosen partly by its HSCodeComp score, so that
+  number is slightly optimistic as an estimate for new listings. The gain
+  holds equally on both halves of the set, though.
 - UK-specific (10-digit UK Trade Tariff codes). The first 6 digits are
   the internationally standardized HS code, but the last 4 are a UK
   extension - codes won't directly match another country's national

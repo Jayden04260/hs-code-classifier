@@ -27,7 +27,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Look up a UK commodity/HS code for a product description.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of candidates to show (default: %(default)s)")
     parser.add_argument(
-        "--no-rerank", action="store_true", help="Skip cross-encoder re-ranking (faster, less accurate)"
+        "--rerank",
+        action="store_true",
+        help="Re-score candidates with a cross-encoder (off by default: it measurably hurt accuracy on "
+        "real product listings with the fine-tuned embedder - see README)",
     )
     parser.add_argument(
         "--no-duty", action="store_true", help="Skip the live duty-rate lookup for the top candidate"
@@ -48,7 +51,7 @@ def main() -> None:
         if not query:
             continue
 
-        candidates = classify(query, index, top_k=args.top_k, use_rerank=not args.no_rerank)
+        candidates = classify(query, index, top_k=args.top_k, use_rerank=args.rerank)
         if not candidates:
             print("No matches found.\n")
             continue
@@ -62,7 +65,7 @@ def main() -> None:
 
         print()
         for i, c in enumerate(candidates, start=1):
-            print(f"  [{i}] {_format_code(c.code)}  (score: {c.score:.2f})")
+            print(f"  [{i}] {_format_code(c.code)}  (score: {c.score:.3f})")
             print(f"      matched: {c.title!r} ({c.level})")
             if i == 1 and not args.no_duty:
                 duty_rate = fetch_standard_duty_rate(c.code)

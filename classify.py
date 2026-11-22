@@ -16,9 +16,14 @@ best-scoring synonym match, so the final top_k is k distinct candidate
 codes, not k possibly-repeated ones.
 """
 
+import hashlib
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
-from embeddings import embed_query, embed_texts
+import numpy as np
+
+from embeddings import DEFAULT_MODEL_NAME, embed_query, embed_texts
 from index import ReferenceIndex
 from references import Reference
 from rerank import rerank as rerank_candidates
@@ -32,14 +37,17 @@ SEARCH_POOL = 20
 
 # Below this score gap between the top and second candidate, treat the
 # classification as low-confidence. Picked from eval_classification.py's
-# confidence-gap quartile breakdown (run against the full search_refs +
-# nomenclature index, re-ranked - the configuration this actually ships
-# with): queries in the bottom two quartiles (gap < ~1.6) averaged 31%
-# top-1 accuracy; the top two quartiles (gap >= ~1.6) averaged 53% - a
-# real, measured split, not a guessed number. Same reasoning as
+# confidence-gap quartile breakdown, run against the configuration this
+# ships with (fine-tuned embedder, cosine scores, no re-ranking): held-out
+# queries in the bottom two quartiles (gap < ~0.04) averaged 33% top-1
+# accuracy, the top two 68%. Checked on HSCodeComp's real listings too
+# (eval_hscodecomp.py), where heading accuracy climbs from 27% in the
+# lowest-gap quartile to 68% in the highest. A measured split, not a guessed
+# number. (The previous 1.6 was calibrated on cross-encoder logits, a
+# different scale - it would flag every cosine result.) Same reasoning as
 # local-rag's NO_ANSWER_THRESHOLD: don't present a low-confidence guess
 # with the same visual weight as a confident one.
-CONFIDENCE_GAP_THRESHOLD = 1.6
+CONFIDENCE_GAP_THRESHOLD = 0.04
 
 
 @dataclass(frozen=True)
@@ -50,8 +58,35 @@ class Candidate:
     score: float
 
 
-def build_index(references: list[Reference]) -> ReferenceIndex:
-    vectors = embed_texts([r.title for r in references])
+# Embedding ~10k reference titles with the default (large) model takes a
+# few seconds on a GPU but a minute or two on a CPU, so the vectors are
+# cached on disk, keyed by model name + the exact titles - any change to
+# either (e.g. after fetch_data.py refreshes the snapshot) misses the
+# cache and re-embeds.
+CACHE_DIR = Path(os.environ.get("HS_CACHE_DIR", Path.home() / ".cache" / "hs-code-classifier"))
+
+
+def _cache_path(titles: list[str], model_name: str) -> Path:
+    digest = hashlib.sha1("\n".join([model_name, *titles]).encode("utf-8")).hexdigest()[:16]
+    return CACHE_DIR / f"index-{digest}.npy"
+
+
+def build_index(
+    references: list[Reference], model_name: str = DEFAULT_MODEL_NAME, use_cache: bool = True
+) -> ReferenceIndex:
+    titles = [r.title for r in references]
+    path = _cache_path(titles, model_name)
+    if use_cache and path.exists():
+        vectors = np.load(path)
+        if vectors.shape[0] == len(references):
+            return ReferenceIndex(vectors, references)
+    vectors = embed_texts(titles, model_name)
+    if use_cache:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(path, vectors)
+        except OSError:
+            pass  # caching is an optimisation; a read-only home dir shouldn't break classification
     return ReferenceIndex(vectors, references)
 
 
@@ -68,7 +103,7 @@ def classify(
     query: str,
     index: ReferenceIndex,
     top_k: int = 5,
-    use_rerank: bool = True,
+    use_rerank: bool = False,
 ) -> list[Candidate]:
     """
     Return up to top_k distinct candidate commodity codes for `query`,

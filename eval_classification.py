@@ -11,8 +11,7 @@ Reports top-1/top-3/top-5 exact-code accuracy, heading-level accuracy
 to, and often what a freight forwarder cares about first), chapter-
 level accuracy (first 2 digits), and mean reciprocal rank (MRR) - with
 and without cross-encoder re-ranking, so the "does re-ranking help"
-question has a real number behind it, in the same spirit as this
-author's local-rag project.
+question has a real number behind it (it now doesn't - see README).
 
 Capped at MAX_EVAL_QUERIES (default 500) of the ~1,600 eligible held-out
 queries: re-ranking runs one cross-encoder pass per query, and running
@@ -36,7 +35,7 @@ Not a pass/fail test - a measurement script. Run it directly:
 import random
 
 from classify import SEARCH_POOL, _dedupe_by_code, build_index
-from embeddings import embed_texts
+from embeddings import embed_queries
 from references import (
     DEFAULT_NOMENCLATURE_PATH,
     DEFAULT_SEED,
@@ -79,7 +78,7 @@ def _run(
     index, eval_refs: list[Reference], use_rerank: bool
 ) -> tuple[list[int | None], list[Reference | None], list[float | None]]:
     queries = [ref.title for ref in eval_refs]
-    query_vectors = embed_texts(queries)
+    query_vectors = embed_queries(queries)
 
     ranks: list[int | None] = []
     top1_refs: list[Reference | None] = []
@@ -125,28 +124,19 @@ def main() -> None:
         eval_refs = eval_refs[:MAX_EVAL_QUERIES]
 
     print(f"Eval: {len(eval_refs)} held-out queries.\n")
-
-    print(f"=== Index: {len(index_refs)} reference titles only ===\n")
-    index = build_index(index_refs)
-    for label, use_rerank in [("cosine only", False), ("+ re-ranking", True)]:
-        ranks, top1_refs, gaps = _run(index, eval_refs, use_rerank)
-        _report(label, ranks, eval_refs, top1_refs)
-        if use_rerank:
-            # Reranked mode is what run.py defaults to, so that's the
-            # mode the confidence gate needs to be calibrated against.
-            _report_confidence_buckets(ranks, gaps)
-        print()
-
-    combined_refs = index_refs + nomenclature_refs
     print(
         f"=== Index: {len(index_refs)} reference titles + "
         f"{len(nomenclature_refs)} official nomenclature entries ===\n"
     )
-    combined_index = build_index(combined_refs)
-    for label, use_rerank in [("cosine only", False), ("+ re-ranking", True)]:
+    # The cache is keyed on the exact titles, so this held-out index never
+    # reuses the full index's vectors (or vice versa).
+    combined_index = build_index(index_refs + nomenclature_refs)
+    for label, use_rerank in [("cosine only (default)", False), ("+ re-ranking", True)]:
         ranks, top1_refs, gaps = _run(combined_index, eval_refs, use_rerank)
         _report(label, ranks, eval_refs, top1_refs)
-        if use_rerank:
+        if not use_rerank:
+            # Cosine-only is what run.py/app.py default to, so that's the
+            # mode the confidence gate is calibrated against.
             _report_confidence_buckets(ranks, gaps)
         print()
 
