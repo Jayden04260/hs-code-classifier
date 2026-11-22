@@ -84,3 +84,33 @@ def test_confidence_gap_is_difference_between_top_two_scores():
 def test_confidence_gap_none_with_fewer_than_two_candidates():
     assert confidence_gap([]) is None
     assert confidence_gap([Candidate(code="1", title="a", level="Heading", score=5.0)]) is None
+
+
+def test_build_index_caches_vectors_on_disk(monkeypatch, tmp_path):
+    monkeypatch.setattr(classify, "CACHE_DIR", tmp_path)
+    calls = []
+
+    def fake_embed(titles, model_name):
+        calls.append(len(titles))
+        return np.ones((len(titles), 4), dtype=np.float32)
+
+    monkeypatch.setattr(classify, "embed_texts", fake_embed)
+    refs = [_ref("1", "a"), _ref("2", "b")]
+
+    first = classify.build_index(refs, model_name="m")
+    second = classify.build_index(refs, model_name="m")
+
+    assert calls == [2]  # second build read the cache
+    assert np.array_equal(first.embeddings, second.embeddings)
+    classify.build_index(refs, model_name="other-model")
+    assert calls == [2, 2]  # a different model never reuses another model's vectors
+
+
+def test_classify_does_not_rerank_by_default(monkeypatch):
+    monkeypatch.setattr(classify, "embed_query", lambda q: np.zeros(3, dtype=np.float32))
+
+    def fail(*args, **kwargs):
+        raise AssertionError("rerank should be opt-in")
+
+    monkeypatch.setattr(classify, "rerank_candidates", fail)
+    classify.classify("query", _FakeIndex([(_ref("1", "a"), 0.9)]))

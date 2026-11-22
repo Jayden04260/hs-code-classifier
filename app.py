@@ -39,7 +39,7 @@ st.caption(
 )
 
 query = st.text_input("Describe the product", placeholder="e.g. wireless bluetooth headphones")
-use_rerank = st.checkbox("Use cross-encoder re-ranking", value=True)
+use_rerank = st.checkbox("Use cross-encoder re-ranking (usually less accurate - see README)", value=False)
 
 if query:
     with st.spinner("Classifying..."):
@@ -60,7 +60,7 @@ if query:
                 cols = st.columns([3, 1])
                 cols[0].markdown(f"**{_format_code(c.code)}**")
                 cols[0].caption(f"matched: {c.title!r} ({c.level})")
-                cols[1].metric("score", f"{c.score:.2f}")
+                cols[1].metric("score", f"{c.score:.3f}")
 
                 if i == 1:
                     duty_rate = fetch_standard_duty_rate(c.code)

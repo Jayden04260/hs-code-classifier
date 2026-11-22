@@ -28,7 +28,6 @@ Run it directly:
 from classify import SEARCH_POOL, _dedupe_by_code, build_index
 from embeddings import embed_query
 from references import DEFAULT_NOMENCLATURE_PATH, load_references
-from rerank import rerank as rerank_candidates
 
 MAX_K = 5
 
@@ -79,7 +78,6 @@ def main() -> None:
     for query, expected_code, source in EVAL_SET:
         query_vector = embed_query(query)
         candidates = index.search(query_vector, top_k=SEARCH_POOL)
-        candidates = rerank_candidates(query, candidates, top_k=SEARCH_POOL)
         deduped = _dedupe_by_code(candidates)[:MAX_K]
 
         rank = _rank_of_correct_code(deduped, expected_code)
